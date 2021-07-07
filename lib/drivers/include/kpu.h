@@ -20,6 +20,7 @@
 #include "dmac.h"
 
 #define kpu_matmul_begin kpu_conv2d_output
+#define IOMEM 0x40000000
 
 typedef int (*plic_irq_callback_t)(void *ctx);
 
@@ -662,20 +663,78 @@ typedef struct
 
 typedef void(*kpu_done_callback_t)(void* userdata);
 
+
 typedef struct
 {
-    const uint8_t *model_buffer;
-    uint8_t *main_buffer;
-    uint32_t output_count;
-    const kpu_model_output_t *outputs;
-    const kpu_model_layer_header_t *layer_headers;
-    const uint8_t *body_start;
-    uint32_t layers_length;
-    volatile uint32_t current_layer;
-    const uint8_t * volatile current_body;
-    dmac_channel_number_t dma_ch;
-    kpu_done_callback_t done_callback;
-    void *userdata;
+	uint8_t start_idx;
+	uint8_t end_idx;
+	uint8_t loading;
+	uint8_t oft;
+}kpu_layer_buf_t;
+
+typedef enum {
+    KL_BUF_INIT = 0,
+    KL_BUF_LOADING,
+	KL_BUF_LOADED,
+	KL_BUF_END
+}kpu_layerbuf_state_t;
+
+typedef enum {
+    KL_SINGLE_BUF = 0,
+    KL_DUAL_BUF = 1
+}kpu_layerbuf_flag_t;
+
+typedef struct
+{
+    int is_nncase;
+
+    union
+    {
+        struct
+        {
+            const uint8_t *model_buffer;
+            const uint8_t *model_header_buffer;
+            uint8_t *main_buffer;
+			/*Add for Flash loader*/
+            union
+            {
+                uint32_t reg;
+                struct
+                {
+                    uint32_t flash_mode:1;
+                    uint32_t reserved:31;
+                } flag;
+            } flag;
+			uint32_t spi_speed;
+			uint8_t *model_buffer_ram_original;
+			uint8_t *model_buffer_ram;
+			uint32_t dual_buf_flag;
+			uint32_t flash_addr;
+			uint32_t buf_idx;
+			uint32_t buf_size;
+			uint32_t layer_batch_size;
+			uint8_t* layer_buf[2];	//预留两个buf
+			kpu_layer_buf_t buf_layer_info[2];	//[start, end),loading,oft
+			uint32_t virtual_model_buffer[2];
+            uint8_t* temp_buff_addr;
+			/*end of Add for Flash loader*/
+            uint32_t output_count;
+            const kpu_model_output_t *outputs;
+            const kpu_model_layer_header_t *layer_headers;
+            const uint8_t *body_start;
+            uint32_t layers_length;
+            volatile uint32_t current_layer;
+            const uint8_t *volatile current_body;
+            dmac_channel_number_t dma_ch;
+            kpu_done_callback_t done_callback;
+            void *userdata;
+        };
+
+        struct
+        {
+            void* nncase_ctx;
+        };
+    };
 } kpu_model_context_t;
 
 typedef struct
@@ -694,257 +753,5 @@ typedef struct _quantize_param
     float scale;
     float bias;
 } quantize_param_t;
-
-extern volatile kpu_config_t *const kpu;
-
-/**
- * @brief       Modle complier init kpu handler
- *
- * @param[in]   task            Kpu handler
- *
- * @return      Kpu handler
- */
-extern kpu_task_t *kpu_task_init(kpu_task_t* task);
-
-/**
- * @brief       Kpu run for AI
- *
- * @param[in]   task                Kpu handler
- * @param[in]   dma_ch              DMA for kpu
- * @param[in]   src                 The picture data
- * @param[in]   dest                The result of kpu
- * @param[in]   callback            The callback of kpu
- *
- * @return      result
- *     - 0      Success
- *     - Other  Fail.Kpu is busy.
- */
-int kpu_run(kpu_task_t* task, dmac_channel_number_t dma_ch, const void *src, void* dest, plic_irq_callback_t callback);
-
-/**
- * @brief       Get kpu result buf
- *
- * @param[in]   task                Kpu handler
- *
- * @return      Kpu result buf
- */
-uint8_t *kpu_get_output_buf(kpu_task_t* task);
-
-/**
- * @brief       Release kpu output buf
- *
- * @param[in]   output_buf                Kpu output buf
- *
- */
-void kpu_release_output_buf(uint8_t *output_buf);
-
-/**
- * @brief       Kpu run for AI
- *
- * @param[in]   task                Kpu handler
-*
-* @return      result
-*     - 0      Success
-*     - Other  Fail.Kpu is busy.
-*/
-int kpu_start(kpu_task_t *task);
-
-/**
- * @brief      Initialize kpu handler
- *
- * @param[in]   task            Kpu handler
- *
- * @return      result
- *     - 0      Success
- *     - Other  Fail.
- */
-int kpu_single_task_init(kpu_task_t *task);
-
-/**
- * @brief      Uninitialize kpu handler
- *
- * @param[in]   task            Kpu handler
- *
- * @return      result
- *     - 0      Success
- *     - Other  Fail.
- */
-int kpu_single_task_deinit(kpu_task_t *task);
-
-/**
- * @brief      Load kmodel and init kpu task
- *
- * @param[in]   task            Kpu handler
- * @param[in]   buffer          Kmodel
- * @param[in]   meta            Test data
- *
- * @return      result
- *     - 0      Success
- *     - Other  Fail.
- */
-int kpu_model_load_from_buffer(kpu_task_t *task, uint8_t *buffer, kpu_model_layer_metadata_t **meta);
-
-/**
- * @brief       Kpu initialize
- *
- * @param[in]   eight_bit_mode            0:16bit mode  1:8bit mode
- * @param[in]   callback                  Callback of kpu
- * @param[in]   userdata                  Data of callback
- *
- */
-void kpu_init(int eight_bit_mode, plic_irq_callback_t callback, void *userdata);
-
-/**
- * @brief       Kpu input data by dma
- *
- * @param[in]   layer                   Kpu task layer
- * @param[in]   src                     Image data
- * @param[in]   dma_ch                  Dmac channel
- * @param[in]   callback                Dmac complete callback
- * @param[in]   userdata                Data of callback
- *
- */
-void kpu_input_dma(const kpu_layer_argument_t *layer, const uint8_t *src, dmac_channel_number_t dma_ch, plic_irq_callback_t callback, void *userdata);
-
-/**
- * @brief       Kpu input data by cpu
- *
- * @param[in]   layer                   Kpu task layer
- * @param[in]   src                     Image data
- * @param[in]   width                   Image width
- * @param[in]   height                  Image heigth
- * @param[in]   channels                Color channel, RGB is 3
- *
- */
-void kpu_input_with_padding(kpu_layer_argument_t *layer, const uint8_t *src, int width, int height, int channels);
-
-/**
- * @brief       Kpu run only one layer
- *
- * @param[in]   layer                   Kpu task layer
- *
- */
-void kpu_conv2d(kpu_layer_argument_t *layer);
-
-/**
- * @brief       Kpu run only one layer then get the result by dma
- *
- * @param[in]   layer                   Kpu task layer
- * @param[in]   dma_ch                  Dmac channel
- * @param[in]   dest                    Result
- * @param[in]   callback                Dmac complete callback
- * @param[in]   userdata                Data of callback
- *
- */
-void kpu_conv2d_output(kpu_layer_argument_t *layer, dmac_channel_number_t dma_ch, uint8_t *dest, plic_irq_callback_t callback, void *userdata);
-
-/**
- * @brief       Kpu pooling
- *
- * @param[in]   src                        Source
- * @param[in]   src_param                  Source param
- * @param[in]   kernel_size                Kernel size, 7*7 is 49
- * @param[in]   channels                   Channels
- * @param[in]   dest                       Dest
- * @param[in]   dest_param                 Dest param
- *
- */
-void kpu_global_average_pool(const uint8_t *src, const quantize_param_t *src_param, int kernel_size, int channels, uint8_t *dest, const quantize_param_t *dest_param);
-
-/**
- * @brief       Kpu pooling
- *
- * @param[in]   src                        Source
- * @param[in]   src_param                  Source param
- * @param[in]   kernel_size                Kernel size, 7*7 is 49
- * @param[in]   channels                   Channels
- * @param[in]   dest                       Dest
- *
- */
-void kpu_global_average_pool_float(const uint8_t *src, const quantize_param_t *src_param, int kernel_size, int channels, float *dest);
-
-/**
- * @brief       Kpu fullly connected by cpu
- *
- * @param[in]   src                                 Source
- * @param[in]   weights                             Weight
- * @param[in]   biases                              Biases
- * @param[in]   dest                                Dest
- * @param[in]   input_channels                      Input channels
- * @param[in]   output_channels                     Output channels
- *
- */
-void kpu_fully_connected(const float *src, const float *weights, const float *biases, float *dest, int input_channels, int output_channels);
-
-/**
- * @brief       Kpu matrix multiplication
- *
- * @param[in]   src                                 Source
- * @param[in]   channels                            Channels
- * @param[in]   dest                                Dest
- * @param[in]   dest_param                          Dest param
- *
- */
-void kpu_matmul_end(const uint8_t *src, int channels, float *dest, const quantize_param_t *dest_param);
-
-/**
- * @brief       Kpu dequantize
- *
- * @param[in]   src                                 Source
- * @param[in]   src_param                           Source param
- * @param[in]   count                               Dequantize count
- * @param[in]   dest                                Dest
- *
- */
-void kpu_dequantize(const uint8_t *src, const quantize_param_t *src_param, size_t count, float *dest);
-
-/**
- * @brief       Kpu load kmodel
- *
- * @param[in]   ctx                                 Kmodel object
- * @param[in]   buffer                              Kmodel buffer
- *
- * @return      result
- *     - 0      Success
- *     - Other  Fail.
- */
-int kpu_load_kmodel(kpu_model_context_t *ctx, const uint8_t *buffer);
-
-/**
- * @brief       Kpu free kmodel buffer
- *
- * @param[in]   ctx                                 kmodel object
- *
- */
-void kpu_model_free(kpu_model_context_t *ctx);
-
-/**
- * @brief       Kpu load kmodel
- *
- * @param[in]   ctx                                 Kmodel object
- * @param[in]   index                               Output index
- * @param[in]   data                                Output data
- * @param[in]   size                                Output data size
- *
- * @return      result
- *     - 0      Success
- *     - Other  Fail.
- */
-int kpu_get_output(kpu_model_context_t *ctx, uint32_t index, uint8_t **data, size_t *size);
-
-/**
- * @brief       Kpu run kmodel
- *
- * @param[in]   ctx                                 Kmodel object
- * @param[in]   src                                 Source data
- * @param[in]   dma_ch                              Dma channel
- * @param[in]   done_callback                       Kpu complete callback
- * @param[in]   userdata                            Data of callback
- *
- * @return      result
- *     - 0      Success
- *     - Other  Fail.
- */
-int kpu_run_kmodel(kpu_model_context_t *ctx, const uint8_t *src, dmac_channel_number_t dma_ch, kpu_done_callback_t done_callback, void *userdata);
 
 #endif

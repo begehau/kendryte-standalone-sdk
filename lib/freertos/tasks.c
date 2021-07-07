@@ -3597,6 +3597,7 @@ static void prvCheckTasksWaitingTermination( void )
 		pxTaskStatus->uxCurrentPriority = pxTCB->uxPriority;
 		pxTaskStatus->pxStackBase = pxTCB->pxStack;
 		pxTaskStatus->xTaskNumber = pxTCB->uxTCBNumber;
+		pxTaskStatus->pxStackTop = pxTCB->pxTopOfStack;
 
 		#if ( configUSE_MUTEXES == 1 )
 		{
@@ -3864,6 +3865,7 @@ UBaseType_t uxPsrId = uxPortGetProcessorId();
 	BaseType_t xTaskGetSchedulerState( void )
 	{
 	BaseType_t xReturn;
+	UBaseType_t uxPsrId = uxPortGetProcessorId();
 
 		if( xSchedulerRunning == pdFALSE )
 		{
